@@ -270,43 +270,33 @@ Return the text with footnote tags added. Do not modify headline tags.
 `;
 };
 
-// --- STEP 2: CONTENT STRUCTURING (FAST PREFIX MODE) ---
+// --- STEP 2: CONTENT STRUCTURING (FULL TAG MODE) ---
 export const getTaskInstructionsForStep2_Content = (
   language: string,
   options?: { level0CanOwnTextLevel?: boolean }
 ): string => {
-  // We largely ignore level0CanOwn in the prompt now, preferring to handle it in post-processing script,
-  // but we inform the AI to focus on simple tagging.
-
   return `
-You are executing STEP 2 (Content Classification). Language: ${language}.
+You are executing STEP 2 (Content Classification & Tagging). Language: ${language}.
 
 GOAL
-Read the chunk. For EVERY LINE, determine its type and add a specific 3-character prefix.
-DO NOT use full XML tags like {{level1}} or {{text_level}}.
-DO NOT group text into blocks.
-DO NOT rewrite content. Copy the line content EXACTLY as is.
-
-PREFIX CODES (Use exactly these):
->>>H0  -> Existing Main Title (was {{level0}})
->>>H1  -> Headline Level 1 (was {{level1}})
->>>H2  -> Headline Level 2 (was {{level2}})
->>>H3  -> Headline Level 3 (was {{level3}})
->>>H4  -> Headline Level 4 (was {{level4}})
->>>H5  -> Headline Level 5 (was {{level5}})
->>>TX  -> Normal Body Text (Paragraphs, definitions, sentences)
->>>LI  -> List Item (starts with (a), 1., (i), -, •)
->>>QT  -> Definition/Quote (starts with " or “)
+Classify every line that is NOT already a headline into a content block.
+Use {{text_level}}...{{-text_level}} to wrap body text.
 
 RULES:
-1. EXISTING HEADLINES: If a line already has {{levelN}}...{{-levelN}}, STRIP the tags and use the corresponding prefix >>>HN.
-   Example: "{{level1}}Chapter 1{{-level1}}" -> ">>>H1 Chapter 1"
-   
-2. RELATIVE DEPTH FOR TEXT:
-   - If a line is a sub-heading or list item relative to the previous headline, use >>>LI or >>>H(N+1).
-   - If a line is clearly body text, use >>>TX.
-   
-3. VERBATIM COPY:
+1. PRESERVE HEADLINES:
+   - Do not modify existing {{levelN}} tags.
+   - Do not wrap {{levelN}} lines inside {{text_level}}.
+
+2. WRAP BODY TEXT:
+   - Identify paragraphs, list items, definitions, and sentences.
+   - Wrap them in {{text_level}}...{{-text_level}}.
+   - Group consecutive body text lines into a single {{text_level}} block where possible, splitting only when a headline interrupts.
+
+3. HIERARCHY / INDENTATION (OPTIONAL but GOOD):
+   - You MAY use {{levelN}} tags for list items if they clearly form a hierarchy under a headline.
+   - E.g. A list item "(a)" under a {{level2}} headline could be tagged as {{level3}}(a)...{{-level3}} OR kept as simple text inside {{text_level}}. Use your judgment to best represent structure.
+
+4. VERBATIM COPY:
    - Copy the text content exactly. Do not fix typos. Do not remove punctuation.
 
 INPUT EXAMPLE:
@@ -315,11 +305,13 @@ Definitions
 (a) "Term" means X.
 
 OUTPUT EXAMPLE:
->>>H1 Article 1
->>>TX Definitions
->>>LI (a) "Term" means X.
+{{level1}}Article 1{{-level1}}
+{{text_level}}
+Definitions
+(a) "Term" means X.
+{{-text_level}}
 
-RETURN ONLY THE PREFIXED TEXT.
+RETURN ONLY THE FULLY TAGGED TEXT.
 `;
 };
 
@@ -421,196 +413,6 @@ OUTPUT CONTRACT
 - No explanations, no markdown, no JSON, no comments.
 `;
 };
-
-// --- STEP 3 GUARDRAIL ---
-// If Step 3 violates invariants (removes text_level, changes text, invents tags),
-// reject the AI output and return the original input.
-
-const STEP3_ALLOWED_TAG = /^{{(-?)(level\d+|text_level|footnote\d+|footnotenumber\d+)}}$/;
-
-const step3Normalize = (s: string) => s.replace(/\r\n/g, '\n');
-
-const step3ExtractTagTokens = (s: string): string[] => {
-  const tokens = s.match(/{{[^}]+}}/g);
-  return tokens ?? [];
-};
-
-const step3HasForbiddenTags = (s: string): string[] => {
-  const tokens = step3ExtractTagTokens(s);
-  const bad: string[] = [];
-  for (const t of tokens) {
-    // forbid text_level1 etc explicitly
-    if (/^{{-?text_level\d+}}$/.test(t)) {
-      bad.push(t);
-      continue;
-    }
-    // forbid computed level forms like {{level2+1}}
-    if (/^{{-?level\d+\s*\+\s*\d+}}$/.test(t)) {
-      bad.push(t);
-      continue;
-    }
-    if (!STEP3_ALLOWED_TAG.test(t)) bad.push(t);
-  }
-  return bad;
-};
-
-const step3Count = (s: string, re: RegExp) => (s.match(re) ?? []).length;
-
-const step3PayloadLines = (s: string): string[] => {
-  const lines = step3Normalize(s).split('\n');
-
-  const payload: string[] = [];
-  for (const line of lines) {
-    const trimmed = line.trim();
-
-    // drop pure text_level marker lines; Step3 can move them
-    if (trimmed === '{{text_level}}' || trimmed === '{{-text_level}}') continue;
-
-    // remove tags but keep the actual text
-    const noTags = line
-      .replace(/{{-?level\d+}}/g, '')
-      .replace(/{{-?footnote\d+}}/g, '')
-      .replace(/{{-?footnotenumber\d+}}/g, '')
-      .replace(/{{-?text_level\d*}}/g, '')
-      .trim();
-
-    payload.push(noTags);
-  }
-  return payload;
-};
-
-// Helper for metadata extraction
-type LineMeta = {
-  levelOpen: number | null;
-  inTextLevel: boolean;
-};
-
-const step3GetLineMetadata = (s: string): LineMeta[] => {
-  const lines = step3Normalize(s).split('\n');
-  const meta: LineMeta[] = [];
-  let inTextLevel = false;
-
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (trimmed === '{{text_level}}') {
-      inTextLevel = true;
-      continue;
-    }
-    if (trimmed === '{{-text_level}}') {
-      inTextLevel = false;
-      continue;
-    }
-
-    const m = trimmed.match(/^{{level(\d+)}}/);
-    const levelOpen = m ? parseInt(m[1], 10) : null;
-
-    meta.push({ levelOpen, inTextLevel });
-  }
-  return meta;
-};
-
-export const guardStep3ConservativeOutput = (before: string, after: string): { text: string; issues: string[] } => {
-  const issues: string[] = [];
-
-  const b = step3Normalize(before);
-  const a = step3Normalize(after);
-
-  // 1) Forbidden / invented tags
-  const badTags = step3HasForbiddenTags(a);
-  if (badTags.length) {
-    issues.push(`Forbidden tags detected: ${badTags.slice(0, 10).join(', ')}`);
-    return { text: before, issues };
-  }
-
-  // 2) If input had text_level blocks, output must still have them (and be balanced)
-  const bOpen = step3Count(b, /{{text_level}}/g);
-  const bClose = step3Count(b, /{{-text_level}}/g);
-  const aOpen = step3Count(a, /{{text_level}}/g);
-  const aClose = step3Count(a, /{{-text_level}}/g);
-
-  if (bOpen > 0 || bClose > 0) {
-    if (aOpen === 0 || aClose === 0) {
-      issues.push('text_level blocks disappeared in Step 3 output.');
-      return { text: before, issues };
-    }
-    if (aOpen !== aClose) {
-      issues.push(`Unbalanced text_level in Step 3 output: open=${aOpen} close=${aClose}`);
-      return { text: before, issues };
-    }
-  }
-
-  // 3) Headline wrappers must remain (count of level tags must match)
-  const bLevelOpen = step3Count(b, /{{level\d+}}/g);
-  const bLevelClose = step3Count(b, /{{-level\d+}}/g);
-  const aLevelOpen = step3Count(a, /{{level\d+}}/g);
-  const aLevelClose = step3Count(a, /{{-level\d+}}/g);
-
-  if (bLevelOpen !== aLevelOpen || bLevelClose !== aLevelClose) {
-    issues.push(`level tag count changed (open ${bLevelOpen}->${aLevelOpen}, close ${bLevelClose}->${aLevelClose}).`);
-    return { text: before, issues };
-  }
-
-  // 4) Footnote wrappers must remain (count must match)
-  const bFn = step3Count(b, /{{footnote\d+}}/g);
-  const aFn = step3Count(a, /{{footnote\d+}}/g);
-  const bFnNum = step3Count(b, /{{footnotenumber\d+}}/g);
-  const aFnNum = step3Count(a, /{{footnotenumber\d+}}/g);
-
-  if (bFn !== aFn || bFnNum !== aFnNum) {
-    issues.push(`footnote tag count changed (footnote ${bFn}->${aFn}, footnotenumber ${bFnNum}->${aFnNum}).`);
-    return { text: before, issues };
-  }
-
-  // 5) Text immutability check (payload lines must match exactly)
-  const beforePayload = step3PayloadLines(b);
-  const afterPayload = step3PayloadLines(a);
-
-  if (beforePayload.length !== afterPayload.length) {
-    issues.push(`payload line count changed (${beforePayload.length} -> ${afterPayload.length}).`);
-    return { text: before, issues };
-  }
-
-  for (let i = 0; i < beforePayload.length; i++) {
-    if (beforePayload[i] !== afterPayload[i]) {
-      issues.push(`payload text changed at line index ${i}.`);
-      return { text: before, issues };
-    }
-  }
-
-  // 6) CRÍTICO: bloquear mudança de levelN em linhas que eram conteúdo (dentro de text_level)
-  const bm = step3GetLineMetadata(b);
-  const am = step3GetLineMetadata(a);
-  const allowContentLevelChanges = true; // CHANGED: Allowed to let AI fix definition indentations (Step 3 Rule D)
-
-  if (bm.length !== am.length) {
-    issues.push(`Metadata line count mismatch (${bm.length} vs ${am.length}).`);
-    return { text: before, issues };
-  }
-
-  for (let i = 0; i < bm.length; i++) {
-    const bLvl = bm[i].levelOpen;
-    const aLvl = am[i].levelOpen;
-
-    if (bLvl === null && aLvl === null) continue;
-    
-    // Check if a level wrapper appeared/disappeared
-    if ((bLvl === null && aLvl !== null) || (bLvl !== null && aLvl === null)) {
-      issues.push(`level wrapper presence changed at line index ${i}.`);
-      return { text: before, issues };
-    }
-
-    if (bLvl !== null && aLvl !== null && bLvl !== aLvl) {
-      const wasContent = bm[i].inTextLevel;
-      if (wasContent && !allowContentLevelChanges) {
-        issues.push(`content level changed inside text_level at line index ${i} (${bLvl} -> ${aLvl}).`);
-        return { text: before, issues };
-      }
-    }
-  }
-
-  return { text: after, issues };
-};
-
 
 // --- SPECIFIC REFINEMENT (SINGLE SHOT) ---
 export const getTaskInstructionsForSpecificRefinement = (language: string, instruction: string, referenceText: string = ''): string => {

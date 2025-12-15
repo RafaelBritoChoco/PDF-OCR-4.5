@@ -7,6 +7,42 @@
 const normalizeNewlines = (s: string) => s.replace(/\r\n/g, "\n").replace(/\r/g, "\n");
 const normalizeForComparison = (s: string) => s.replace(/\s+/g, '').trim();
 
+/* --- Internal Helpers --- */
+
+const fixComputedLevelTags = (s: string) => {
+  // {{level2+1}} -> {{level3}}
+  return s.replace(/{{(-?)level(\d+)\s*\+\s*(\d+)}}/g, (_m, neg, a, b) => {
+    const sum = Number(a) + Number(b);
+    return `{{${neg ? "-" : ""}level${sum}}}`;
+  });
+};
+
+const stripTextLevelVariants = (s: string) => {
+  // remove/normalize invented tags like {{text_level1}}
+  return s
+    .replace(/{{text_level\d+}}/g, "{{text_level}}")
+    .replace(/{{-text_level\d+}}/g, "{{-text_level}}");
+};
+
+const extractLevelFromLine = (trimmed: string): number | null => {
+  const m = trimmed.match(/^{{level(\d+)}}/);
+  return m ? Number(m[1]) : null;
+};
+
+const startsWithQuote = (s: string): boolean => {
+  const t = s.trim();
+  return t.startsWith('"') || t.startsWith('“') || t.startsWith('”');
+};
+
+const stripTagsFromLine = (s: string): string => {
+  return s.replace(/{{[^}]+}}/g, '').trim();
+};
+
+const isPureOpenTextLevel = (trimmed: string) => trimmed === "{{text_level}}";
+const isPureCloseTextLevel = (trimmed: string) => trimmed === "{{-text_level}}";
+const isFootnoteLine = (trimmed: string) => /^{{footnote\d+}}/.test(trimmed);
+const isHeadlineOrContentLine = (trimmed: string) => /^{{level\d+}}/.test(trimmed);
+
 /**
  * Validates that Step 2 output (>>>H1 Title) matches Input (Title) exactly in content.
  * Throws error if mismatch is found.
@@ -81,6 +117,7 @@ export const convertShortTagsToFullStructure = (text: string): string => {
       continue;
     }
 
+    // PREFIX HANDLERS
     const hMatch = line.match(/^>>>H(\d)\s?(.*)$/);
     if (hMatch) {
       const level = hMatch[1];
@@ -112,6 +149,7 @@ export const convertShortTagsToFullStructure = (text: string): string => {
       continue;
     }
 
+    // Fallback
     const safeLine = stripExistingTags(line);
     openTextLevel();
     outLines.push(safeLine);
@@ -120,40 +158,6 @@ export const convertShortTagsToFullStructure = (text: string): string => {
   closeTextLevel();
   return outLines.join('\n');
 };
-
-/* --- Internal Helpers for Validation --- */
-
-const fixComputedLevelTags = (s: string) => {
-  return s.replace(/{{(-?)level(\d+)\s*\+\s*(\d+)}}/g, (_m, neg, a, b) => {
-    const sum = Number(a) + Number(b);
-    return `{{${neg ? "-" : ""}level${sum}}}`;
-  });
-};
-
-const stripTextLevelVariants = (s: string) => {
-  return s
-    .replace(/{{text_level\d+}}/g, "{{text_level}}")
-    .replace(/{{-text_level\d+}}/g, "{{-text_level}}");
-};
-
-const extractLevelFromLine = (trimmed: string): number | null => {
-  const m = trimmed.match(/^{{level(\d+)}}/);
-  return m ? Number(m[1]) : null;
-};
-
-const startsWithQuote = (s: string): boolean => {
-  const t = s.trim();
-  return t.startsWith('"') || t.startsWith('“') || t.startsWith('”');
-};
-
-const stripTagsFromLine = (s: string): string => {
-  return s.replace(/{{[^}]+}}/g, '').trim();
-};
-
-const isPureOpenTextLevel = (trimmed: string) => trimmed === "{{text_level}}";
-const isPureCloseTextLevel = (trimmed: string) => trimmed === "{{-text_level}}";
-const isFootnoteLine = (trimmed: string) => /^{{footnote\d+}}/.test(trimmed);
-const isHeadlineOrContentLine = (trimmed: string) => /^{{level\d+}}/.test(trimmed);
 
 /**
  * Heurística GENÉRICA para corrigir hierarquia de definições.
@@ -225,6 +229,9 @@ export const fixLeadInDefinitionHierarchy = (text: string): string => {
   return out.join('\n');
 };
 
+/**
+ * Validates structural integrity, fixing dead branches and logical errors.
+ */
 export const validateStructuralIntegrity = (text: string): string => {
   let s = normalizeNewlines(text);
   s = fixComputedLevelTags(s);
@@ -248,33 +255,39 @@ export const validateStructuralIntegrity = (text: string): string => {
     line = stripTextLevelVariants(line);
     const trimmed = line.trim();
 
+    // 1. Footnotes break out of text_level
     if (isFootnoteLine(trimmed)) {
       pushCloseIfOpen();
       out.push(line);
       continue;
     }
 
+    // 2. Explicit text_level markers
     if (isPureOpenTextLevel(trimmed)) {
       if (!textLevelOpen && currentStructuralHeadlineLevel > 0) {
         textLevelOpen = true;
         out.push("{{text_level}}");
       }
-      continue; 
+      continue; // consume input line
     }
     if (isPureCloseTextLevel(trimmed)) {
       pushCloseIfOpen();
-      continue; 
+      continue; // consume input line
     }
 
+    // 3. Headline/Content Logic (Fixed Branching)
     if (isHeadlineOrContentLine(trimmed)) {
         const lvl = extractLevelFromLine(trimmed);
         if (lvl !== null) {
+            // Case A: Structural Headline (Level <= Current Parent)
             if (lvl <= currentStructuralHeadlineLevel) {
                 pushCloseIfOpen();
                 currentStructuralHeadlineLevel = lvl;
                 out.push(line);
                 continue;
             }
+            
+            // Case B: Content Headline (Level > Current Parent)
             if (lvl > currentStructuralHeadlineLevel) {
                 if (!textLevelOpen) {
                     out.push("{{text_level}}");
@@ -286,6 +299,7 @@ export const validateStructuralIntegrity = (text: string): string => {
         }
     }
 
+    // 4. Fallback for plain text
     if (!textLevelOpen && trimmed.length > 0) {
          if (currentStructuralHeadlineLevel > 0) {
              out.push("{{text_level}}");
@@ -310,17 +324,58 @@ const step3HasForbiddenTags = (s: string): string[] => {
   const tokens = step3ExtractTagTokens(s);
   const bad: string[] = [];
   for (const t of tokens) {
-    if (/^{{-?text_level\d+}}$/.test(t)) {
-      bad.push(t);
-      continue;
-    }
-    if (/^{{-?level\d+\s*\+\s*\d+}}$/.test(t)) {
-      bad.push(t);
-      continue;
-    }
+    if (/^{{-?text_level\d+}}$/.test(t)) { bad.push(t); continue; }
+    if (/^{{-?level\d+\s*\+\s*\d+}}$/.test(t)) { bad.push(t); continue; }
     if (!STEP3_ALLOWED_TAG.test(t)) bad.push(t);
   }
   return bad;
+};
+
+const step3Count = (s: string, re: RegExp) => (s.match(re) ?? []).length;
+
+const step3PayloadLines = (s: string): string[] => {
+  const lines = normalizeNewlines(s).split('\n');
+  const payload: string[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === '{{text_level}}' || trimmed === '{{-text_level}}') continue;
+    const noTags = line
+      .replace(/{{-?level\d+}}/g, '')
+      .replace(/{{-?footnote\d+}}/g, '')
+      .replace(/{{-?footnotenumber\d+}}/g, '')
+      .replace(/{{-?text_level\d*}}/g, '')
+      .trim();
+    payload.push(noTags);
+  }
+  return payload;
+};
+
+// Helper for metadata extraction
+type LineMeta = {
+  levelOpen: number | null;
+  inTextLevel: boolean;
+};
+
+const step3GetLineMetadata = (s: string): LineMeta[] => {
+  const lines = normalizeNewlines(s).split('\n');
+  const meta: LineMeta[] = [];
+  let inTextLevel = false;
+
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (trimmed === '{{text_level}}') {
+      inTextLevel = true;
+      continue;
+    }
+    if (trimmed === '{{-text_level}}') {
+      inTextLevel = false;
+      continue;
+    }
+    const m = trimmed.match(/^{{level(\d+)}}/);
+    const levelOpen = m ? parseInt(m[1], 10) : null;
+    meta.push({ levelOpen, inTextLevel });
+  }
+  return meta;
 };
 
 export const guardStep3ConservativeOutput = (
@@ -328,17 +383,45 @@ export const guardStep3ConservativeOutput = (
   after: string
 ): { text: string; issues: string[] } => {
   const issues: string[] = [];
+  const b = normalizeNewlines(before);
   const a = fixLeadInDefinitionHierarchy(normalizeNewlines(after));
-  
-  // Basic Forbidden Tag Check
+
+  // 1) Forbidden tags
   const badTags = step3HasForbiddenTags(a);
   if (badTags.length) {
-    issues.push(`Forbidden tags detected: ${badTags.slice(0, 10).join(", ")}`);
+    issues.push(`Forbidden tags: ${badTags.slice(0, 10).join(", ")}`);
     return { text: before, issues };
   }
-  
-  // (Full structure checks omitted for brevity, but this file is where they live)
-  // For the purpose of "enxugar", we keep the essential contract: don't break the build.
-  
+
+  // 2) Balance text_level
+  const bOpen = step3Count(b, /{{text_level}}/g);
+  const aOpen = step3Count(a, /{{text_level}}/g);
+  const aClose = step3Count(a, /{{-text_level}}/g);
+
+  if (bOpen > 0 && aOpen === 0) {
+      issues.push("text_level blocks disappeared.");
+      return { text: before, issues };
+  }
+  if (aOpen !== aClose) {
+      issues.push(`Unbalanced text_level: open=${aOpen} close=${aClose}`);
+      return { text: before, issues };
+  }
+
+  // 3) Payload check
+  const beforePayload = step3PayloadLines(b);
+  const afterPayload = step3PayloadLines(a);
+
+  if (beforePayload.length !== afterPayload.length) {
+    issues.push(`Line count changed (${beforePayload.length} -> ${afterPayload.length}).`);
+    return { text: before, issues };
+  }
+
+  for (let i = 0; i < beforePayload.length; i++) {
+    if (beforePayload[i] !== afterPayload[i]) {
+      issues.push(`Text changed at line ${i}.`);
+      return { text: before, issues };
+    }
+  }
+
   return { text: a, issues };
 };
