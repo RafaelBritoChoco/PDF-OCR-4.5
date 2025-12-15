@@ -1,0 +1,73 @@
+
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/vite.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PDF OCR v4.5</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+  <script type="importmap">
+{
+  "imports": {
+    "react/": "https://aistudiocdn.com/react@^19.1.1/",
+    "react": "https://aistudiocdn.com/react@^19.1.1",
+    "react-dom/": "https://aistudiocdn.com/react-dom@^19.1.1/",
+    "@google/genai": "https://aistudiocdn.com/@google/genai@^1.19.0",
+    "marked": "https://aistudiocdn.com/marked@^16.2.1",
+    "pdfjs-dist": "https://aistudiocdn.com/pdfjs-dist@^5.4.296/build/pdf.mjs",
+    "pdfjs-dist/": "https://aistudiocdn.com/pdfjs-dist@^5.4.296/",
+    "@monaco-editor/react": "https://aistudiocdn.com/@monaco-editor/react@^4.6.0"
+  }
+}
+</script>
+<style>
+  @keyframes highlight-fade {
+    from { background-color: rgba(250, 204, 21, 0.4); }
+    to { background-color: transparent; }
+  }
+  .line-highlight {
+    animation: highlight-fade 2s ease-out;
+  }
+  /* Styles for PDF.js text layer and search highlighting */
+  .pdf-viewer-container {
+      position: relative;
+      overflow: auto;
+  }
+  .textLayer {
+      position: absolute;
+      left: 0;
+      top: 0;
+      right: 0;
+      bottom: 0;
+      color: transparent;
+      overflow: hidden;
+      opacity: 1; /* Make it visible for debugging, but should be transparent */
+      line-height: 1.0;
+      z-index: 2;
+  }
+  .textLayer > span {
+      position: absolute;
+      white-space: pre;
+      cursor: text;
+      transform-origin: 0% 0%;
+  }
+  .textLayer .highlight {
+      margin: -1px;
+      padding: 1px;
+      background-color: rgba(255, 255, 0, 0.4);
+      border-radius: 4px;
+  }
+  .pdf-canvas {
+      position: absolute;
+      top: 0;
+      left: 0;
+      z-index: 1;
+  }
+</style>
+</head>
+  <body class="bg-gray-900 text-white">
+    <div id="root"></div>
+    <script type="module" src="/index.tsx"></script>
+  </body>
+</html>
